@@ -1,15 +1,26 @@
 """Buff/Debuff 的叠加规则与 DoT 快照。
 
-缺陷：slow 的叠加规则写成 refresh（口径是取最强）、层数不封顶、
-DoT 每一跳都拿当前攻击力重算（口径要施法瞬间的快照）。
+规则表（README 口径）：
+
+- keep-strongest：同名效果只保留最强的那一次；新效果不更强时整次丢弃，
+  更强时整体替换（强度/层数/持续时间都取自新效果）。
+- refresh（默认）：新效果覆盖强度与持续时间，层数累加。
+
+层数统一封顶在 MAX_STACKS；DoT 在施法瞬间对属性快照，之后攻击力变化
+不影响已挂上的持续伤害。
 """
 
 MAX_STACKS = 5
-RULES = {"slow": "refresh"}  # 缺陷：口径是 keep-strongest
+
+RULES = {
+    "slow": "keep-strongest",
+}
 
 
 class Aura:
     """一个光环或减益。"""
+
+    __slots__ = ("name", "power", "duration", "stacks")
 
     def __init__(self, name, power, duration, stacks=1):
         self.name = name
@@ -25,17 +36,21 @@ class AuraSet:
         self.auras = {}
 
     def add(self, aura):
+        stacks = max(0, min(MAX_STACKS, aura.stacks))
         if aura.name not in self.auras:
-            self.auras[aura.name] = aura
+            self.auras[aura.name] = Aura(aura.name, aura.power, aura.duration, stacks)
             return
         existing = self.auras[aura.name]
         rule = RULES.get(aura.name, "refresh")
-        if rule == "refresh":
-            existing.power = aura.power  # 缺陷：refresh 覆盖了更强的旧效果
-        else:
-            existing.power = max(existing.power, aura.power)
+        if rule == "keep-strongest":
+            if aura.power > existing.power:
+                existing.power = aura.power
+                existing.duration = aura.duration
+                existing.stacks = stacks
+            return
+        existing.power = aura.power
         existing.duration = max(existing.duration, aura.duration)
-        existing.stacks = existing.stacks + aura.stacks  # 缺陷：没有按 MAX_STACKS 封顶
+        existing.stacks = max(0, min(MAX_STACKS, existing.stacks + stacks))
 
     def value(self, name):
         return self.auras[name].power if name in self.auras else 0
@@ -44,12 +59,23 @@ class AuraSet:
         return self.auras[name].stacks if name in self.auras else 0
 
     def tick(self):
-        for aura in list(self.auras.values()):
+        expired = None
+        for name, aura in self.auras.items():
             aura.duration -= 1
             if aura.duration <= 0:
-                del self.auras[aura.name]
+                if expired is None:
+                    expired = [name]
+                else:
+                    expired.append(name)
+        if expired:
+            for name in expired:
+                del self.auras[name]
 
 
 def dot_total(snapshot_power, current_attack, ticks):
-    """缺陷：口径要求用施法瞬间的属性快照，现在每跳都拿当前攻击力算。"""
-    return current_attack * ticks
+    """用施法瞬间的属性快照计算持续伤害总伤。
+
+    current_attack 仅保留在签名里以兼容调用方，实际不参与计算：伤害在
+    施法时就已定下，之后攻击力变化不影响这一轮跳伤害。
+    """
+    return snapshot_power * ticks
